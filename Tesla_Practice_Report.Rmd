@@ -1,0 +1,2035 @@
+---
+title: ""
+format:
+  html:
+    title-block-style: none
+embed-resources: true
+editor: source
+warning: false
+message: false
+execute:
+  echo: false
+---
+
+<div style="text-align:center;">
+
+# **Tesla Fatal Crash Involvement Analysis — Geographic, Weather & Risk Patterns (FARS 2023)**
+
+</div>
+
+```{r, include=FALSE}
+# 1) Current status (kept invisible)
+invisible(getwd())
+
+# 2) Set the folder that actually contains the CSVs
+setwd("C:/Users/patterd7/Desktop/PERSONAL/FARS2023NationalCSV")
+```
+
+```{r setup, include=FALSE}
+# ---- setup ---------------------------------------------------------------
+# Make all chunks run as if they start in the data folder
+knitr::opts_knit$set(root.dir = "C:/Users/patterd7/Desktop/PERSONAL/FARS2023NationalCSV")
+
+# Set working directory during knit
+setwd("C:/Users/patterd7/Desktop/PERSONAL/FARS2023NationalCSV")
+
+accident <- readr::read_csv("accident.csv")
+vehicle  <- readr::read_csv("vehicle.csv")
+person   <- readr::read_csv("person.csv")
+
+```
+
+```{r}
+# 1) Clean names (temporary helper) + light normalization
+# --- Temporary replacement for janitor::clean_names() ---
+clean_names_quick <- function(x) {
+  x <- gsub("[^A-Za-z0-9]+", "_", x)  # non-alphanumeric -> underscore
+  x <- gsub("_+", "_", x)             # collapse multiple underscores
+  x <- gsub("^_|_$", "", x)           # trim leading/trailing underscores
+  tolower(x)
+}
+
+# Clean column names for all three tables
+names(accident) <- clean_names_quick(names(accident))
+names(vehicle)  <- clean_names_quick(names(vehicle))
+names(person)   <- clean_names_quick(names(person))
+
+# Light normalization for fields I’ll actually analyze
+vehicle <- vehicle |>
+  dplyr::mutate(
+    makename      = stringr::str_to_upper(stringr::str_trim(makename)),
+    vpicmakename  = stringr::str_to_upper(stringr::str_trim(vpicmakename)),
+    vpicmodelname = stringr::str_to_title(stringr::str_trim(vpicmodelname)),
+    statename     = stringr::str_to_title(stringr::str_trim(statename)),
+    monthname     = stringr::str_to_title(stringr::str_trim(monthname)),
+    dayname       = stringr::str_to_title(stringr::str_trim(dayname))
+  )
+
+person <- person |>
+  dplyr::mutate(
+    inj_sevname   = stringr::str_to_title(stringr::str_trim(inj_sevname)),
+    makename      = stringr::str_to_upper(stringr::str_trim(makename)),
+    vpicmakename  = stringr::str_to_upper(stringr::str_trim(vpicmakename))
+  )
+```
+
+```{r}
+#2) Keys and flags (Tesla + fatality logic)
+
+# Tesla flag 
+vehicle <- vehicle |>
+  dplyr::mutate(
+    tesla_flag  = (makename == "TESLA") | (vpicmakename == "TESLA"),
+    model_label = dplyr::coalesce(vpicmodelname, as.character(model))
+  )
+
+# Person-level fatal indicator
+person <- person |>
+  dplyr::mutate(fatal_person = inj_sevname == "Fatal Injury")
+```
+
+```{r}
+# 3) Joins (person→vehicle, then vehicle→accident) and derived feats
+
+# Person + Vehicle: one row per person with vehicle context attached
+person_vehicle <- person |>
+  dplyr::left_join(
+    vehicle |>
+      dplyr::select(st_case, veh_no, tesla_flag, makename, vpicmakename,
+                    model_label, statename, monthname, dayname),
+    by = c("st_case", "veh_no")
+  )
+
+# Deaths per vehicle (derived from person table)
+deaths_by_vehicle <- person_vehicle |>
+  dplyr::group_by(st_case, veh_no) |>
+  dplyr::summarise(deaths_from_person = sum(fatal_person, na.rm = TRUE), .groups = "drop")
+
+# Vehicle + Accident: add crash-level context and deaths
+vehicle_acc <- vehicle |>
+  dplyr::left_join(
+    accident |>
+      dplyr::select(st_case, fatals, statename, monthname, dayname, weathername, lgt_condname, func_sysname, rur_urbname),
+    by = "st_case"
+  ) |>
+  dplyr::left_join(deaths_by_vehicle, by = c("st_case", "veh_no")) |>
+  dplyr::mutate(deaths_from_person = tidyr::replace_na(deaths_from_person, 0L))
+```
+
+```{r, include=FALSE}
+# 4) Quick QA checks 
+
+# Confirm that person-derived deaths add up to accident FATALS
+qa_match <- vehicle_acc |>
+  dplyr::group_by(st_case) |>
+  dplyr::summarise(
+    deaths_from_person_sum = sum(deaths_from_person, na.rm = TRUE),
+    fatals_accident        = dplyr::first(fatals)
+  ) |>
+  dplyr::summarise(match_rate = mean(deaths_from_person_sum == fatals_accident, na.rm = TRUE))
+
+qa_match
+```
+
+```{r}
+# Temporary replacement for janitor::clean_names()
+clean_names_quick <- function(x) {
+  x <- gsub("[^A-Za-z0-9]+", "_", x)
+  x <- gsub("_+", "_", x)
+  x <- gsub("^_|_$", "", x)
+  tolower(x)
+}
+
+names(accident) <- clean_names_quick(names(accident))
+names(vehicle)  <- clean_names_quick(names(vehicle))
+names(person)   <- clean_names_quick(names(person))
+```
+
+
+```{r}
+# --- Normalize fields we will use often ---
+vehicle <- vehicle |>
+  dplyr::mutate(
+    makename        = stringr::str_to_upper(stringr::str_trim(makename)),
+    vpicmakename    = stringr::str_to_upper(stringr::str_trim(vpicmakename)),
+    vpicmodelname   = stringr::str_to_title(stringr::str_trim(vpicmodelname)),
+    statename       = stringr::str_to_title(stringr::str_trim(statename)),
+    monthname       = stringr::str_to_title(stringr::str_trim(monthname)),
+    dayname         = stringr::str_to_title(stringr::str_trim(dayname))
+  )
+
+person <- person |>
+  dplyr::mutate(
+    inj_sevname     = stringr::str_to_title(stringr::str_trim(inj_sevname)),
+    makename        = stringr::str_to_upper(stringr::str_trim(makename)),
+    vpicmakename    = stringr::str_to_upper(stringr::str_trim(vpicmakename)),
+    fatal_person    = inj_sevname == "Fatal Injury"
+  )
+
+# --- Tesla flag (robust across both MAKE sources) ---
+vehicle <- vehicle |>
+  dplyr::mutate(
+    tesla_flag  = makename == "TESLA" | vpicmakename == "TESLA",
+    model_label = dplyr::coalesce(vpicmodelname, as.character(model))
+  )
+
+# --- Join: person + vehicle ---
+person_vehicle <- person |>
+  dplyr::left_join(
+    vehicle |>
+      dplyr::select(
+        st_case, veh_no, tesla_flag, makename, vpicmakename,
+        model_label, statename, monthname, dayname
+      ),
+    by = c("st_case", "veh_no")
+  )
+
+# --- Deaths per vehicle from people table ---
+deaths_by_vehicle <- person_vehicle |>
+  dplyr::group_by(st_case, veh_no) |>
+  dplyr::summarise(
+    deaths_from_person = sum(fatal_person, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# --- Join: vehicle + accident + derived deaths ---
+vehicle_acc <- vehicle |>
+  dplyr::left_join(
+    accident |>
+      dplyr::select(
+        st_case, fatals, statename, monthname, dayname,
+        weathername, lgt_condname, func_sysname, rur_urbname
+      ),
+    by = "st_case"
+  ) |>
+  dplyr::left_join(
+    deaths_by_vehicle,
+    by = c("st_case","veh_no")
+  ) |>
+  dplyr::mutate(
+    deaths_from_person = tidyr::replace_na(deaths_from_person, 0L)
+  )
+
+```
+
+```{r, include=FALSE}
+# --- Rebuilding a stronger Tesla flag on existing `vehicle` ---
+vehicle <- vehicle |>
+  dplyr::mutate(
+    makename_norm     = stringr::str_to_upper(gsub("[^A-Z0-9]", "", makename)),
+    vpicmakename_norm = stringr::str_to_upper(gsub("[^A-Z0-9]", "", vpicmakename)),
+    tesla_flag        = dplyr::coalesce(
+                          stringr::str_starts(makename_norm,     "TESLA"),
+                          FALSE
+                        ) |
+                        dplyr::coalesce(
+                          stringr::str_starts(vpicmakename_norm, "TESLA"),
+                          FALSE
+                        )
+  )
+
+# Quick sanity check — how many rows look like Tesla now?
+vehicle |>
+  dplyr::filter(tesla_flag) |>
+  dplyr::count(makename, vpicmakename, sort = TRUE) |>
+  print(n = 20)
+```
+
+```{r, include=FALSE}
+# Person + Vehicle 
+person_vehicle <- person |>
+  dplyr::left_join(
+    vehicle |>
+      dplyr::select(st_case, veh_no, tesla_flag, makename, vpicmakename, model_label),
+    by = c("st_case", "veh_no")
+  )
+
+# Rebuild deaths by vehicle from the (person + vehicle) table
+deaths_by_vehicle <- person_vehicle |>
+  dplyr::group_by(st_case, veh_no) |>
+  dplyr::summarise(deaths_from_person = sum(inj_sevname == "Fatal Injury", na.rm = TRUE),
+                   .groups = "drop")
+
+# Vehicle + Accident (take state/time/weather ONLY from ACCIDENT)
+vehicle_acc <- vehicle |>
+  dplyr::select(st_case, veh_no, tesla_flag, model_label) |>
+  dplyr::left_join(
+    accident |>
+      dplyr::select(st_case, statename, monthname, dayname, weathername, lgt_condname, func_sysname, rur_urbname, fatals),
+    by = "st_case"
+  ) |>
+  dplyr::left_join(deaths_by_vehicle, by = c("st_case", "veh_no")) |>
+  dplyr::mutate(deaths_from_person = tidyr::replace_na(deaths_from_person, 0L))
+
+# Quick peek
+dplyr::glimpse(vehicle_acc)
+```
+
+```{r, include=FALSE}
+tesla_by_state <- vehicle_acc |>
+  dplyr::filter(tesla_flag) |>
+  dplyr::distinct(st_case, statename) |>
+  dplyr::count(statename, sort = TRUE)
+
+print(tesla_by_state, n = 60)
+```
+
+```{r prep_all_objects, include=FALSE, message=FALSE, warning=FALSE}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(stringr)
+  library(scales)
+  library(tidyr)
+  library(forcats)
+})
+
+# ============================================================
+# 1. TESLA FLAG 
+# ============================================================
+
+vehicle <- vehicle %>%
+  mutate(
+    makename_fix     = toupper(trimws(makename)),
+    vpicmakename_fix = toupper(trimws(vpicmakename)),
+    tesla_flag       = str_starts(vpicmakename_fix, "TESLA") |
+                       str_starts(makename_fix, "TESLA")
+  )
+
+# ============================================================
+# 2. TOP 10 STATES (Geography KPIs + chart)
+# ============================================================
+
+top10 <- tesla_by_state %>%
+  slice_max(n, n = 10) %>%
+  arrange(desc(n)) %>%
+  mutate(statename = factor(statename, levels = statename))
+
+normal_orange <- "#F97316"
+light_orange  <- "#FFEAD5"
+
+min_n  <- min(top10$n, na.rm = TRUE)
+max_n  <- max(top10$n, na.rm = TRUE)
+plateau <- min(max(30, min_n), max_n)
+
+# ============================================================
+# 3. CRASH‑LEVEL TABLE (foundation for ALL weather analyses)
+# ============================================================
+
+bucket_weather <- function(x) {
+  x <- str_to_title(str_trim(x))
+  case_when(
+    is.na(x) | x == "" | x %in% c("Unknown","Not Reported","Unknown/Not Reported") ~ "Unknown/Not Reported",
+    str_detect(x, "Clear") ~ "Clear",
+    str_detect(x, "Cloud") ~ "Cloudy",
+    str_detect(x, "Rain|Drizzle|Freezing Rain") ~ "Rain",
+    str_detect(x, "Snow|Sleet|Hail") ~ "Snow / Sleet / Hail",
+    str_detect(x, "Fog|Smog|Smoke") ~ "Fog / Smoke",
+    str_detect(x, "Blowing Sand|Dust|Soil|Dirt") ~ "Blowing Sand / Dust",
+    str_detect(x, "Wind") ~ "Severe Winds",
+    TRUE ~ "Other"
+  )
+}
+
+tesla_crash_ids <- vehicle_acc %>%
+  filter(tesla_flag) %>%
+  distinct(st_case) %>%
+  pull(st_case)
+
+crash_level <- accident %>%
+  transmute(
+    st_case,
+    weather_grp = bucket_weather(weathername),
+    tesla_involved = st_case %in% tesla_crash_ids
+  )
+
+# ============================================================
+# 4. SHARE OF TESLA CRASHES BY WEATHER (%)
+# ============================================================
+
+share_by_weather <- crash_level %>%
+  group_by(weather_grp) %>%
+  summarise(
+    crashes     = n(),
+    tesla_n     = sum(tesla_involved),
+    tesla_share = tesla_n / crashes,
+    .groups = "drop"
+  ) %>%
+  arrange(desc(tesla_share))
+
+overall_share <- mean(crash_level$tesla_involved)
+
+# values for TeslaShare% chart
+min_s   <- min(share_by_weather$tesla_share)
+max_s   <- max(share_by_weather$tesla_share)
+plateau <- max_s * 0.60
+y_max   <- max(c(share_by_weather$tesla_share, overall_share)) * 1.28
+
+# ============================================================
+# 5. TESLA VS NATIONAL AVERAGE (side‑by‑side chart)
+# ============================================================
+
+plot_df <- share_by_weather %>%
+  transmute(weather_grp,
+            group = factor("Tesla", levels = c("Tesla","National average")),
+            value = tesla_share, crashes) %>%
+  bind_rows(
+    share_by_weather %>%
+      transmute(weather_grp,
+                group = factor("National average", levels = c("Tesla","National average")),
+                value = overall_share, crashes)
+  )
+
+order_by_tesla <- share_by_weather %>%
+  arrange(desc(tesla_share)) %>%
+  pull(weather_grp)
+
+plot_df <- plot_df %>%
+  mutate(weather_grp = factor(weather_grp, levels = order_by_tesla))
+
+# ============================================================
+# 6. RAIN VS CLEAR (OR, Fisher, CI for KPI + chart)
+# ============================================================
+
+rain_clear <- crash_level %>%
+  filter(weather_grp %in% c("Clear","Rain")) %>%
+  mutate(weather_bin = factor(weather_grp, levels = c("Clear","Rain")))
+
+share_rc <- rain_clear %>%
+  group_by(weather_bin) %>%
+  summarise(share = mean(tesla_involved), n = n(), .groups = "drop")
+
+# logistic regression
+m_rc <- glm(tesla_involved ~ weather_bin, data = rain_clear, family = binomial())
+or_rc <- unname(exp(coef(m_rc)[2]))
+
+# Fisher test
+tab_rc <- table(rain_clear$weather_bin, rain_clear$tesla_involved)
+fish   <- fisher.test(tab_rc)
+or_f   <- unname(fish$estimate)
+ci_f   <- fish$conf.int
+p_f    <- fish$p.value
+
+# ============================================================
+# 7. FULL ASSOCIATION TEST (Weather vs Tesla involvement)
+# ============================================================
+
+tab <- table(crash_level$weather_grp, crash_level$tesla_involved)
+
+chi_try  <- suppressWarnings(chisq.test(tab))
+expected <- chi_try$expected
+
+use_fisher <- any(expected < 5)
+
+if (use_fisher) {
+  test_out <- suppressWarnings(fisher.test(tab))
+  p_value  <- unname(test_out$p.value)
+  method   <- "Fisher"
+  stat     <- NA_real_
+  chi_stat <- suppressWarnings(chisq.test(tab)$statistic)
+} else {
+  chi      <- suppressWarnings(chisq.test(tab))
+  p_value  <- unname(chi$p.value)
+  stat     <- unname(chi$statistic)
+  method   <- "Chi-square"
+  chi_stat <- stat
+}
+
+N <- sum(tab)
+k <- min(nrow(tab), ncol(tab))
+cramers_v <- if (k > 1) as.numeric(sqrt(chi_stat / (N * (k - 1)))) else NA_real_
+
+assoc_results <- list(
+  method    = method,
+  p_value   = p_value,
+  statistic = stat,
+  cramers_v = cramers_v,
+  n         = sum(tab)
+)
+
+```
+
+---
+
+<center>
+### Executive Summary 
+</center>
+
+---
+
+This analysis examined whether Tesla’s camera‑only perception system performs differently in adverse weather, particularly rain. In 2023 FARS data, Tesla's appeared proportionally more often in fatal crashes during rain than the national baseline, while showing average or below‑average involvement in all other weather conditions. If this rainy‑weather pattern continues in future data, it may indicate a need for additional sensing support—such as enhanced radar or LiDAR—to improve performance in heavy precipitation.
+
+---
+
+<center>
+### Key Metrics Summary 
+</center>
+
+---
+
+```{r tesla_master_exec_summary, echo=FALSE, warning=FALSE, message=FALSE, results='asis'}
+# ---- Tesla Executive Summary KPIs ----
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(scales)
+})
+
+# ===============================================================
+# VALUES FROM PREP
+# ===============================================================
+
+rain_share    <- share_by_weather$tesla_share[share_by_weather$weather_grp=="Rain"]
+clear_share   <- share_by_weather$tesla_share[share_by_weather$weather_grp=="Clear"]
+cloudy_share  <- share_by_weather$tesla_share[share_by_weather$weather_grp=="Cloudy"]
+snow_share    <- share_by_weather$tesla_share[share_by_weather$weather_grp=="Snow / Sleet / Hail"]
+
+nat_avg <- overall_share
+
+california_count  <- top10$n[top10$statename=="California"]
+states_with_tesla <- tesla_by_state %>% filter(n > 0) %>% nrow()
+total_tesla       <- sum(tesla_by_state$n)
+
+rain_or      <- signif(or_f, 3)
+rain_ci_low  <- signif(ci_f[1], 3)
+rain_ci_high <- signif(ci_f[2], 3)
+
+# ===============================================================
+# HELPERS — 2 DECIMAL PLACE FORMAT
+# ===============================================================
+
+# ✅ Force 2 decimals in KPI boxes (e.g., "23.45%")
+fmt_pct <- function(x) paste0(formatC(x * 100, format="f", digits=2), "%")
+
+fmt_int <- function(x) comma(x)
+
+# ✅ Arrow differences 
+delta_arrow <- function(x, baseline){
+  diff <- x - baseline
+  
+  # exact match
+  if (abs(diff) < .Machine$double.eps^0.5) {
+    return('<span class="delta-na">meets national average</span>')
+  }
+  
+  # 2‑decimal diff
+  diff_txt <- paste0(formatC(diff * 100, digits = 2, format = "f"), "%")
+  
+  if (diff < 0) {
+    return(sprintf(
+      '<span class="delta-good">▾ %s below national average</span>',
+      diff_txt
+    ))
+  }
+  
+  sprintf(
+    '<span class="delta-bad">▴ %s above national average</span>',
+    diff_txt
+  )
+}
+
+# ===============================================================
+# CSS
+# ===============================================================
+
+cat('
+<style>
+
+.kpi-grid {
+  display:grid;
+  grid-template-columns:repeat(auto-fit, minmax(260px,1fr));
+  gap:16px;
+  margin: 1rem 0;
+}
+
+.kpi-card {
+  border:1px solid #e5e5e5;
+  border-radius:12px;
+  padding:16px;
+  background:#fff;
+  box-shadow:0 1px 3px rgba(0,0,0,0.05);
+}
+
+.kpi-card h3 {
+  margin:0 0 6px 0;
+  font-size:1.05rem;
+  font-weight:700;
+}
+
+.kpi {
+  font-size:1.35rem;
+  font-weight:700;
+}
+
+.sub {
+  font-size:0.9rem;
+  color:#666;
+  margin-top:4px;
+}
+
+.delta-good { color:#0A7A2A; font-weight:700; margin-left:6px; }
+.delta-bad  { color:#C03;   font-weight:700; margin-left:6px; }
+.delta-na   { color:#000;   font-weight:700; margin-left:6px; }
+
+.exec-title { font-size:1.8rem; font-weight:600; margin-bottom:4px; }
+.exec-outcome { font-size:1rem; color:#444; margin-bottom:18px; }
+
+</style>
+')
+
+# ===============================================================
+# EXEC SUMMARY
+# ===============================================================
+
+cat('<div class="kpi-grid">')
+
+# ===============================================================
+# KPI CARDS
+# ===============================================================
+
+# Rain
+cat(sprintf('
+<div class="kpi-card">
+  <h3>🌧️ Tesla Share – Rain (Higher Risk)</h3>
+  <p class="kpi">%s</p>
+  <p class="sub">%s</p>
+</div>', fmt_pct(rain_share), delta_arrow(rain_share, nat_avg)))
+
+# Clear
+cat(sprintf('
+<div class="kpi-card">
+  <h3>☀️ Tesla Share – Clear</h3>
+  <p class="kpi">%s</p>
+  <p class="sub">%s</p>
+</div>', fmt_pct(clear_share), delta_arrow(clear_share, nat_avg)))
+
+# Snow
+cat(sprintf('
+<div class="kpi-card">
+  <h3>❄️ Tesla Share – Snow (Lower Risk)</h3>
+  <p class="kpi">%s</p>
+  <p class="sub">%s</p>
+</div>', fmt_pct(snow_share), delta_arrow(snow_share, nat_avg)))
+
+# Cloudy
+cat(sprintf('
+<div class="kpi-card">
+  <h3>☁️ Tesla Share – Cloudy</h3>
+  <p class="kpi">%s</p>
+  <p class="sub">%s</p>
+</div>', fmt_pct(cloudy_share), delta_arrow(cloudy_share, nat_avg)))
+
+# Odds ratio
+cat(sprintf('
+<div class="kpi-card">
+  <h3>⚠️ Odds Ratio – Rain vs Clear</h3>
+  <p class="kpi">%s</p>
+  <p class="sub">Teslas were more likely to be involved in fatal crashes during rain.</p>
+  <p class="sub">95%% CI: %s – %s</p>
+</div>', rain_or, rain_ci_low, rain_ci_high))
+
+# California
+cat(sprintf('
+<div class="kpi-card">
+  <h3>📍 Most Affected State</h3>
+  <p class="kpi">California — %s</p>
+  <p class="sub">Highest Tesla-involved fatal crash count</p>
+</div>', fmt_int(california_count)))
+
+# State count
+cat(sprintf('
+<div class="kpi-card">
+  <h3>🗺️ States With Tesla Fatal Crashes</h3>
+  <p class="kpi">%s of 50</p>
+  <p class="sub">Indicates geographic concentration</p>
+</div>', states_with_tesla))
+
+# Total crashes
+cat(sprintf('
+<div class="kpi-card">
+  <h3>🚘 Total Tesla Fatal Crashes</h3>
+  <p class="kpi">%s</p>
+  <p class="sub">Crashes with ≥1 Tesla vehicle involved</p>
+</div>', fmt_int(total_tesla)))
+
+cat('</div>')
+
+```
+
+---
+
+<center>
+### Detailed Interpretation of Findings
+</center>
+
+---
+
+In 2023, Tesla’s involvement in fatal crashes showed its clearest deviation in **rainy conditions**, where Tesla’s share rose above the national average despite rain representing a small portion of total U.S. driving exposure. This makes rain the most meaningful weather‑related outlier in the dataset. Although rain increases crash risk for all drivers, the difference between Tesla’s rainy‑weather share and the national baseline suggests that **heavy precipitation may challenge the performance of Tesla’s camera‑dependent perception system**, where raindrops, glare, and reduced contrast can obscure lane markings and visual cues. This raises reasonable engineering questions about whether future enhancements—such as improved radar integration or LiDAR‑assisted sensing—could strengthen performance in adverse weather.
+
+By comparison, Tesla’s involvement in **clear‑weather** fatal crashes was aligned with the national average, and the vehicle was **under‑represented in Cloudy, Fog, Snow, and other low‑visibility conditions**, which generally reflect regions with lower Tesla exposure. Geographic patterns show a predictable concentration of Tesla‑involved crashes in California and other high‑adoption states, emphasizing that much of Tesla’s fatal‑crash footprint is shaped by where Teslas are most common.
+
+Statistical comparisons support these observations: Rain was the only weather type where Tesla involvement notably exceeded the national proportion, with a modest but meaningful increase relative to clear conditions. While these results **do not measure fault or risk per mile**, they highlight the specific environments where Tesla’s real‑world involvement diverges from expectation. Rainy conditions stand out as the environment most worthy of continued technical monitoring and further analysis in future years of FARS data, to determine whether this pattern reflects a persistent sensitivity, shifting exposure, or a temporary fluctuation in the 2023 dataset.
+
+---
+
+<center>
+### Introduction 
+</center>
+
+---
+
+### Purpose 🎯
+
+The purpose of this report is to analyze **all Tesla‑involved fatal crashes in 2023**, using the most recent publicly available national crash data. The analysis identifies where these incidents occurred, how often they happened under different weather conditions, and how Tesla’s crash involvement compares with broader national patterns.
+
+### Context ️🗺️
+
+As Tesla adoption has increased, so has interest in understanding their real‑world safety performance, especially regarding environmental conditions and geographic concentration. This report does not assign fault; instead, it highlights patterns in the data showing where Tesla‑involved fatalities appear more or less common.
+
+### Data Limitations ⚠️
+
+Although Tesla has made multiple improvements to its driver-assist and autonomous systems since 2023, these enhancements are not yet reflected in federal datasets. As a result, this report represents the most recent full year of fatal‑crash data available.
+
+---
+
+<div style="text-align:center;">
+### Methodology 
+</div>
+
+---
+
+### Data Source ️📄
+This analysis uses the **2023 NHTSA Fatality Analysis Reporting System (FARS)** crash, vehicle, and weather datasets — the most recent complete national fatal‑crash data available.
+
+
+### Identifying Tesla‑Involved Crashes 🚗
+Tesla vehicles were identified using multiple fields within the vehicle dataset, including:
+
+- the official FARS MAKE code
+- cleaned manufacturer names
+- VIN‑decoded make information
+
+A crash was counted as Tesla‑involved if **any vehicle** in the event was identified as a Tesla. All crashes were consolidated to one row per event using the unique case ID.
+
+
+### Weather Standardization ️🌦️
+Raw weather descriptions were grouped into consistent, interpretable categories such as:
+Clear, Rain, Cloudy, Snow/Sleet/Hail, Fog/Smoke, Severe Winds, Blowing Dust, Unknown/Not Reported.
+This standardization ensured valid comparisons️ between Tesla‑involved crashes and all fatal crashes.
+
+
+### Geographic Aggregation️ 🗺️
+State‑level patterns were generated by counting Tesla‑involved crashes by state and aligning state names with postal abbreviations for mapping. A capped orange color scale was used to maintain readability in high‑volume states such as California️.
+
+
+### Tesla vs National Weather Comparison 📊
+For each weather category, two metrics were calculated:
+
+**Tesla share** — percent of Tesla-involved fatal crashes occurring in that weather
+**National share** — percent of all fatal crashes occurring in that weather
+
+Weather categories were ordered by Tesla share to highlight the highest‑risk conditions (Rain and Clear in 2023). Side‑by‑side bar charts were used to compare Tesla vs national percentages.
+
+
+### Statistical Testing 🧪
+A crash‑level contingency table was used to test whether Tesla involvement varied across weather categories.
+
+Chi‑square tests were used when assumptions were met
+Fisher’s Exact Test was used for small expected counts
+Cramer’s V was calculated to measure effect size
+
+A focused **Rain vs Clear** comparison also estimated an odds ratio via logistic regression and Fisher’s test, quantifying how much more likely Tesla involvement was in rain relative to clear conditions.
+
+### Visualization 📈
+All visualizations were created with **ggplot2**, using consistent label styling and color palettes. Interactive versions were produced using **plotly**, with custom tooltips displaying crash counts, Tesla shares, and category labels.
+
+---
+
+<div style="text-align:center;">
+### Geographic Analysis 🗺️
+</div>
+
+---
+
+### **Tesla‑Involved Fatal Crashes by State — Highest‑Impact Locations**
+```{r}
+library(dplyr)
+library(ggplot2)
+library(plotly)
+library(scales)
+
+# --- Top 10, descending left -> right ---
+top10 <- tesla_by_state %>%
+  slice_max(n, n = 10) %>%
+  arrange(desc(n)) %>%
+  mutate(statename = factor(statename, levels = statename))
+
+# Color palette
+normal_orange <- "#F97316"
+light_orange  <- "#FFEAD5"
+
+min_n  <- min(top10$n, na.rm = TRUE)
+max_n  <- max(top10$n, na.rm = TRUE)
+plateau <- min(max(30, min_n), max_n)
+
+# ------------------
+# GGPLOT (title centered)
+# ------------------
+p <- ggplot(
+  top10,
+  aes(
+    x    = statename,
+    y    = n,
+    fill = n,
+    text = paste0("<b>", statename, "</b><br>Crashes: ", comma(n))
+  )
+) +
+  geom_col(width = 0.70, color = "#111111", linewidth = 0.25) +
+  geom_text(
+    aes(label = n),
+    vjust = -0.45,
+    size  = 4.6,
+    color = "#111111"
+  ) +
+  scale_fill_gradientn(
+    colours = c(light_orange, normal_orange, normal_orange),
+    values  = scales::rescale(c(min_n, plateau, max_n)),
+    name    = "Crashes",
+    limits  = c(min_n, max_n)
+  ) +
+  scale_y_continuous(
+    expand = expansion(mult = c(0, 0.30)),
+    labels = comma
+  ) +
+  labs(
+    title    = "Top States for Tesla-Involved Fatal Crashes (2023)",
+    subtitle = "FARS 2023 • Crashes with ≥ 1 Tesla vehicle",
+    x = NULL,
+    y = "Count of Crashes",
+    caption = "Source: NHTSA FARS 2023"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title        = element_text(face = "plain", size = 18, hjust = 0.5),   # ✅ centered
+    plot.subtitle     = element_text(size = 12.5, hjust = 0.5, margin = margin(b = 8)),  # ✅ centered
+    axis.text.x       = element_text(angle = 45, hjust = 1, vjust = 1, size = 11),
+    panel.grid.major.x= element_blank(),
+    panel.grid.minor  = element_blank(),
+    panel.grid.major.y= element_line(color = "#E6E8EF"),
+    plot.margin       = margin(16, 24, 16, 16)
+  ) +
+  coord_cartesian(clip = "off")
+
+# ------------------
+# PLOTLY 
+# ------------------
+p_i <- ggplotly(p, tooltip = "text") %>%
+  layout(
+   title = list(
+  text = "Top States for Tesla-Involved Fatal Crashes (2023)",
+  x = 0.55,       
+  y = 0.88,       
+  xanchor = "center",
+  yanchor = "top"
+),
+    hoverlabel = list(bgcolor = "white", font = list(color = "#111", size = 12)),
+    margin = list(l = 40, r = 20, t = 80, b = 90),
+    coloraxis = list(colorbar = list(title = "Crashes"))
+  )
+
+p_i
+```
+
+**California dominates Tesla‑involved fatal crashes with 59 incidents — more than double any other state.**
+This reflects California’s exceptionally high Tesla adoption and overall traffic exposure. Florida and Texas follow but at significantly lower levels, indicating that Tesla‑related fatalities in 2023 were heavily concentrated in a small number of high‑population, high‑EV‑density states. Most other states show single‑digit crash counts, highlighting a steep geographic drop‑off.
+
+---
+
+### **U.S. heat map of Tesla-involved fatal crashes**
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(plotly)
+library(scales)
+library(usmap)
+
+# STATE NAME → ABBREVIATION
+state_lookup <- data.frame(
+  statename = state.name,
+  state = state.abb,
+  stringsAsFactors = FALSE
+)
+
+tesla_map <- tesla_by_state %>%
+  mutate(statename = gsub("\\.", "", statename)) %>%
+  left_join(state_lookup, by = "statename") %>%
+  rename(`Fatal crashes` = n)
+
+# Handle DC
+tesla_map$state[tesla_map$statename == "District of Columbia"] <- "DC"
+
+# COLORS
+normal_orange <- "#F97316"
+light_orange  <- "#FFEAD5"
+
+min_n  <- min(tesla_map$`Fatal crashes`, na.rm = TRUE)
+max_n  <- max(tesla_map$`Fatal crashes`, na.rm = TRUE)
+plateau <- min(max(30, min_n), max_n)
+
+# -----------------------------
+# GGPLOT
+# -----------------------------
+p_map <- plot_usmap(
+  data   = tesla_map,
+  values = "Fatal crashes",
+  regions = "states",
+  color = "#111111",
+  linewidth = 0.4
+) +
+  scale_fill_gradientn(
+    colours = c(light_orange, normal_orange, normal_orange),
+    values  = scales::rescale(c(min_n, plateau, max_n)),
+    name    = "Fatal crashes",
+    na.value = "#E5E7EB"
+  ) +
+  labs(
+    title    = "Tesla-Involved Fatal Crashes — U.S. Heat Map",
+    subtitle = "FARS 2023 • Crashes with ≥ 1 Tesla vehicle",
+    caption  = "Source: NHTSA FARS 2023"
+  ) +
+  theme_minimal(base_size = 15) +
+  theme(
+    plot.title    = element_text(face = "plain", size = 18, hjust = 0.5),   # ✅ not bold
+    plot.subtitle = element_text(size = 12.5, hjust = 0.5),
+    legend.title  = element_text(size = 12),
+    legend.text   = element_text(size = 11),
+    axis.text     = element_blank(),
+    axis.title    = element_blank(),
+    panel.grid    = element_blank(),
+    plot.margin   = margin(20, 20, 20, 20)
+  )
+
+# -----------------------------
+# GPlotly  
+# -----------------------------
+p_map_i <- ggplotly(
+  p_map,
+  tooltip = c("state", "Fatal crashes")
+)
+
+for (i in seq_along(p_map_i$x$data)) {
+  if (!is.null(p_map_i$x$data[[i]]$type) &&
+      p_map_i$x$data[[i]]$type == "scatter") {
+    p_map_i$x$data[[i]]$hoveron  <- "fills"
+    p_map_i$x$data[[i]]$fillrule <- "evenodd"
+  }
+}
+
+p_map_i
+
+```
+
+The national heat map reinforces the concentrated pattern seen in the bar chart. **Western and Sun Belt states show the highest Tesla fatal crash counts**, with clear hotspots in California, Florida, Texas, and Arizona. Much of the Midwest and Northeast remains relatively light, suggesting lower exposure and fewer Tesla‑involved crashes. The spatial distribution indicates that **Tesla fatal crashes in 2023 were primarily a function of where Teslas are most prevalent**, rather than widespread national risk.
+
+---
+
+<div style="text-align:center;">
+### Weather Analysis 🌦️
+</div>
+
+---
+
+### **Tesla Fatal Crash Counts by Weather Category**
+
+```{r}
+# Build Tesla-by-weather table (crash-level, each crash counted once)
+tesla_by_weather <- vehicle_acc %>%
+  filter(tesla_flag) %>%
+  distinct(st_case, weathername) %>%   # 1 row per crash
+  count(weathername, sort = TRUE) %>%
+  mutate(weathername = ifelse(is.na(weathername) | weathername == "", "Unknown/Not Reported", weathername))
+
+# Keep top 10 weather categories
+tesla_weather_top10 <- tesla_by_weather %>%
+  slice_max(n, n = 10) %>%
+  arrange(desc(n)) %>%
+  mutate(weathername = factor(weathername, levels = weathername))
+
+# Plateau
+min_w  <- min(tesla_weather_top10$n)
+max_w  <- max(tesla_weather_top10$n)
+plateau_w <- max(10, round(max_w * 0.6))
+
+p_w <- ggplot(
+  tesla_weather_top10,
+  aes(
+    x = weathername,
+    y = n,
+    fill = n,
+    text = paste0("<b>", weathername, "</b><br>Crashes: ", comma(n))
+  )
+) +
+  geom_col(width = 0.7, color = "#111111", linewidth = 0.25) +
+  geom_text(aes(label = n), vjust = -0.45, size = 4, fontface = "bold", color = "#1F2937") +
+  scale_fill_gradientn(
+    colours = c("#FFEAD5", "#F97316", "#F97316"),
+    values  = scales::rescale(c(min_w, plateau_w, max_w)),
+    name    = "Crashes",
+    limits  = c(min_w, max_w)
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.18)), labels = comma) +
+  labs(
+    title    = "Tesla Fatal Crashes - Weather Distribution Count", 
+    subtitle = "FARS 2023 • Count of crashes with ≥ 1 Tesla vehicle",
+    x = "Weather",
+    y = "Count of Crashes",
+    caption = "Source: NHTSA FARS 2023"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title    = element_text(face = "plain", size = 18, hjust = 0.5),  
+    plot.subtitle = element_text(size = 12.5, hjust = 0.5, margin = margin(b = 8)),
+    axis.text.x   = element_text(angle = 45, hjust = 1, vjust = 1, size = 11),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.y = element_line(color = "#E6E8EF"),
+    plot.margin   = margin(16, 24, 16, 16)
+  ) +
+  coord_cartesian(clip = "off")
+
+plotly::ggplotly(p_w, tooltip = "text") %>%
+  layout(
+    hoverlabel = list(bgcolor = "white", font = list(color = "#111", size = 12)),
+    margin = list(l = 40, r = 20, t = 70, b = 90)
+  )
+```
+
+Most Tesla‑involved fatal crashes in 2023 occurred during **Clear weather**, which mainly reflects typical driving exposure since most U.S. driving happens in clear conditions. Cloudy and Rain conditions follow but are far lower in raw count compared to Clear. Very few Tesla fatal crashes occurred in Fog, Smoke, or Snow, suggesting these environments were not major contributors to Tesla fatalities. The large gap between Clear and all other weather types highlights how overall exposure drives raw crash counts.
+
+```{r}
+# ---- Chunk A: Weather prep ----
+library(dplyr)
+library(stringr)
+library(scales)
+
+# 1) Bucket weather names into a small set of intuitive categories
+bucket_weather <- function(x) {
+  x <- str_to_title(str_trim(x))
+  case_when(
+    is.na(x) | x == "" | x %in% c("Unknown", "Not Reported", "Unknown/Not Reported") ~ "Unknown/Not Reported",
+    str_detect(x, "Clear") ~ "Clear",
+    str_detect(x, "Cloud") ~ "Cloudy",
+    str_detect(x, "Rain|Drizzle|Freezing Rain") ~ "Rain",
+    str_detect(x, "Snow|Sleet|Hail") ~ "Snow / Sleet / Hail",
+    str_detect(x, "Fog|Smog|Smoke") ~ "Fog / Smoke",
+    str_detect(x, "Blowing Sand|Dust|Soil|Dirt") ~ "Blowing Sand / Dust",
+    str_detect(x, "Wind") ~ "Severe Winds",
+    TRUE ~ "Other"
+  )
+}
+
+# 2) Tesla-involved crashes: count once per crash, then bucket weather
+tesla_weather <- vehicle_acc %>%
+  filter(tesla_flag) %>%
+  distinct(st_case, weathername) %>%
+  mutate(weather_grp = bucket_weather(weathername)) %>%
+  count(weather_grp, name = "tesla_n") %>%
+  mutate(tesla_pct = tesla_n / sum(tesla_n))
+
+# 3) All fatal crashes (context)
+all_weather <- accident %>%
+  transmute(weather_grp = bucket_weather(weathername)) %>%
+  count(weather_grp, name = "all_n") %>%
+  mutate(all_pct = all_n / sum(all_n))
+
+# 4) Combine (for comparison & plotting order)
+wx_compare <- tesla_weather %>%
+  dplyr::full_join(all_weather, by = "weather_grp") %>%
+  dplyr::mutate(
+    dplyr::across(c(tesla_n, all_n), ~tidyr::replace_na(.x, 0L)),
+    dplyr::across(c(tesla_pct, all_pct), ~tidyr::replace_na(.x, 0)),
+    # Order categories by Tesla percentage, descending
+    weather_grp = factor(weather_grp, levels = weather_grp[order(-tesla_pct)])
+  )
+```
+
+---
+
+### **Tesla Fatal Crash Percentage by Weather Category**
+
+```{r}
+# ---- Chunk B: Viz 1 (Tesla % by weather) ----
+library(ggplot2)
+library(plotly)
+
+# Orange palette with plateau at 30% of max (keeps strong orange for high bars)
+normal_orange <- "#F97316"
+light_orange  <- "#FFEAD5"
+
+max_pct <- max(wx_compare$tesla_pct)
+plateau <- max_pct * 0.60  # plateau at 60% of top category
+
+pwx_tesla <- ggplot(
+  wx_compare,
+  aes(
+    x = weather_grp, y = tesla_pct, fill = tesla_pct,
+    text = paste0("<b>", weather_grp, "</b><br>Share of Tesla crashes: ", percent(tesla_pct))
+  )
+) +
+  geom_col(width = 0.70, color = "#111111", linewidth = 0.25) +
+  geom_text(aes(label = percent(tesla_pct, accuracy = 0.1)),
+            vjust = -0.45, size = 4.6, fontface = "bold", color = "#111111") +
+  scale_fill_gradientn(
+    colours = c(light_orange, normal_orange, normal_orange),
+    values  = scales::rescale(c(0, plateau, max_pct)),
+    name    = "Share"
+  ) +
+  scale_y_continuous(labels = percent, expand = expansion(mult = c(0, 0.30))) +
+  labs(
+    title    = "Tesla Fatal Crashes - Weather Distribution %",  
+    subtitle = "Each bar represents the % of Tesla-involved fatal crashes occurring under that weather condition",
+    x = "Weather",
+    y = "% of Tesla-Involved Fatal Crashes",
+    caption = "Source: NHTSA FARS 2023"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title    = element_text(face = "plain", size = 18, hjust = 0.5),  
+    plot.subtitle = element_text(size = 12.5, hjust = 0.5, margin = margin(b = 8)),
+    axis.text.x   = element_text(angle = 45, hjust = 1, vjust = 1, size = 11),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.y = element_line(color = "#E6E8EF"),
+    plot.margin   = margin(16, 24, 16, 16)
+  ) +
+  coord_cartesian(clip = "off")
+
+plotly::ggplotly(pwx_tesla, tooltip = "text") %>%
+  layout(
+    hoverlabel = list(bgcolor = "white", font = list(color = "#111", size = 12)),
+    margin = list(l = 40, r = 20, t = 70, b = 80)
+  )
+```
+
+Although Clear weather produced the highest number of Tesla fatal crashes, Clear also accounts for **75% of Tesla’s fatal‑crash distribution**, showing how dominant normal visibility conditions were in 2023. Rain represents only about **9%** of Tesla’s fatal crashes, but its elevated share compared to national averages suggests that rain may pose a comparatively higher risk environment for Teslas. Snow, Fog, and other low‑visibility conditions contribute very small percentages, indicating that Teslas rarely experienced fatal crashes in those settings. Overall, most Tesla fatal crashes occurred during ordinary, nonhazardous weather, with Rain standing out as the primary exception.
+
+```{r}
+vehicle <- vehicle %>%
+  mutate(
+    make_chr       = as.character(make),
+    makename_up    = toupper(trimws(makename)),
+    vpicmake_up    = toupper(trimws(vpicmakename)),
+
+    tesla_flag =
+      make_chr == "108" |                     # Tesla MAKE code in FARS
+      makename_up == "TESLA" |                # cleaned makename
+      vpicmake_up == "TESLA"                  # VIN-decoded make name
+  )
+```
+
+```{r load_data_once}
+knitr::opts_chunk$set(echo = FALSE, message = TRUE, warning = TRUE)
+
+# Root all relative paths at the project root.
+# Make sure the 'here' package is installed.
+if (!requireNamespace("here", quietly = TRUE)) {
+  stop("Please install the 'here' package: install.packages('here')")
+}
+knitr::opts_knit$set(root.dir = here::here())
+
+```
+
+```{r wx-compare, include=FALSE, message=TRUE, warning=TRUE}
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(forcats)
+
+# ---- Weather bucketing ----
+bucket_weather <- function(x) {
+  x <- str_to_title(str_trim(x))
+  case_when(
+    is.na(x) | x == "" |
+      x %in% c("Unknown","Not Reported","Unknown/Not Reported") ~ "Unknown/Not Reported",
+    str_detect(x, "Clear")                                   ~ "Clear",
+    str_detect(x, "Cloud")                                   ~ "Cloudy",
+    str_detect(x, "Rain|Drizzle|Freezing Rain")              ~ "Rain",
+    str_detect(x, "Snow|Sleet|Hail")                         ~ "Snow / Sleet / Hail",
+    str_detect(x, "Fog|Smog|Smoke")                          ~ "Fog / Smoke",
+    str_detect(x, "Blowing Sand|Dust|Soil|Dirt")             ~ "Blowing Sand / Dust",
+    str_detect(x, "Wind")                                    ~ "Severe Winds",
+    TRUE                                                     ~ "Other"
+  )
+}
+
+# ---- Tesla-involved crashes (count once per crash) ----
+tesla_weather <- vehicle_acc %>%
+  filter(tesla_flag) %>%
+  distinct(st_case, weathername) %>%
+  mutate(weather_grp = bucket_weather(weathername)) %>%
+  count(weather_grp, name = "tesla_n") %>%
+  mutate(tesla_pct = tesla_n / sum(tesla_n))
+
+# ---- All fatal crashes (comparison group) ----
+all_weather <- accident %>%
+  transmute(weather_grp = bucket_weather(weathername)) %>%
+  count(weather_grp, name = "all_n") %>%
+  mutate(all_pct = all_n / sum(all_n))
+
+# ---- Combine ----
+wx_compare <- tesla_weather %>%
+  full_join(all_weather, by = "weather_grp") %>%
+  mutate(
+    across(c(tesla_n, all_n), ~ replace_na(.x, 0L)),
+    across(c(tesla_pct, all_pct), ~ replace_na(.x, 0)),
+    weather_grp = factor(weather_grp, levels = weather_grp[order(-tesla_pct)])
+  )
+
+# ---- Long format for plotting ----
+wx_long <- wx_compare %>%
+  pivot_longer(
+    cols = c(tesla_pct, all_pct),
+    names_to = "group",
+    values_to = "pct"
+  ) %>%
+  mutate(
+    group = recode(group,
+                   tesla_pct = "Tesla",
+                   all_pct   = "All Crashes"),
+    lbl = scales::percent(pct, accuracy = 0.1),
+    label_x = pct + 0.015,
+    is_tiny = pct < 0.06
+  )
+```
+
+---
+
+### **Tesla vs National Average — Fatal Crash Share by Weather**
+
+```{r}
+# 📊 Tesla vs All Crashes — Weather Comparison
+library(dplyr)
+library(ggplot2)
+library(plotly)
+library(forcats)
+library(scales)
+
+# ---- Totals ----
+total_tesla <- sum(wx_compare$tesla_n, na.rm = TRUE)
+total_all   <- sum(wx_compare$all_n,   na.rm = TRUE)
+
+# ---- Prep Data ----
+wx_long2 <- wx_long %>%
+  mutate(weather_grp = as.character(weather_grp)) %>%
+  left_join(
+    wx_compare %>% mutate(weather_grp = as.character(weather_grp)),
+    by = "weather_grp"
+  ) %>%
+  rename(
+    tesla_n = tesla_n.x,
+    all_n   = all_n.x
+  ) %>%
+  select(-tesla_n.y, -all_n.y) %>%
+  mutate(
+    weather_grp = fct_reorder(weather_grp, pct, .desc = TRUE),
+    pct_label   = percent(pct, accuracy = 0.1),
+    label_x     = pct + 0.08,   # far‑right label positions
+    hover_text  = paste0(
+      "<b>", weather_grp, "</b><br>",
+      group, ": ", pct_label, "<br>",
+      "Count: ",
+      if_else(group == "Tesla",
+              paste0(comma(tesla_n), " / ", comma(total_tesla)),
+              paste0(comma(all_n),  " / ", comma(total_all)))
+    )
+  )
+
+# ---- GGPLOT ----
+p_weather <- ggplot(
+  wx_long2,
+  aes(y = weather_grp, x = pct, fill = group, text = hover_text)
+) +
+  geom_col(
+    width = 0.80,
+    position = position_dodge(width = 0.85),
+    color = "#111111", linewidth = 0.22
+  ) +
+  geom_segment(
+    aes(x = pct, xend = pct + 0.03, yend = weather_grp),
+    position = position_dodge(width = 0.85),
+    linewidth = 0.28, color = "#9CA3AF"
+  ) +
+  geom_text(
+    aes(x = label_x, label = pct_label),
+    position = position_dodge(width = 0.85),
+    hjust = 0, size = 4.2, fontface = "bold"
+  ) +
+  scale_fill_manual(
+    values = c("Industry Average" = "#94A3B8",
+               "Tesla"           = "#F97316"),
+    name = NULL
+  ) +
+  scale_x_continuous(
+    labels = percent_format(1),
+    breaks = c(0, .25, .50, .75),
+    expand = expansion(mult = c(0.02, 0.28))
+  ) +
+  labs(
+    x = "% of Crashes",
+    y = "Weather"
+  ) +
+  theme_minimal(base_size = 15) +
+  theme(
+    plot.title = element_blank(),        # REMOVE ggplot title
+    plot.subtitle = element_blank(),     # remove subtitle too
+    axis.title.x = element_text(size = 14),  # x-axis title font matches y-axis
+    axis.title.y = element_text(size = 14),
+    axis.text.y  = element_text(size = 12),
+    legend.position = "bottom",
+    panel.grid.major.y = element_blank(),
+    panel.grid.major.x = element_line(color = "#E6E8EF"),
+    plot.margin = margin(40, 40, 60, 40)
+  ) +
+  coord_cartesian(clip = "off")
+
+# ---- PLOTLY ----
+p_weather_interactive <- ggplotly(
+  p_weather,
+  tooltip = "text",
+  height = length(unique(wx_long2$weather_grp)) * 80,   
+  width = NULL                                           
+)
+
+# Expand x‑axis so % labels don't overlap
+p_weather_interactive$x$layout$xaxis$range <- c(0, 1.10)
+
+# Remove ggplot-provided title (we use Plotly's only)
+p_weather_interactive$x$layout$title <- NULL
+
+p_weather_interactive <- p_weather_interactive %>%
+  layout(
+    autosize = TRUE,
+    margin = list(
+      l = 60,
+      r = 60,
+      t = 110,
+      b = 150
+    ),
+
+    xaxis = list(
+      title = list(
+        text = "% of Crashes",
+        font = list(size = 18)   
+      ),
+      tickformat = ".0%",
+      automargin = TRUE,
+      zeroline = FALSE,
+      gridcolor = "#D9D9D9"
+    ),
+
+    yaxis = list(
+      title = list(
+        text = "Weather",
+        font = list(size = 18)   
+      ),
+      automargin = TRUE,
+      fixedrange = TRUE
+    ),
+
+    # Single, perfectly-centered title
+    annotations = list(
+      list(
+        x = 0.5,
+        y = 1.12,
+        xref = "paper",
+        yref = "paper",
+        text = "Tesla vs National Average — Fatal Crash Share",
+        showarrow = FALSE,
+        font = list(size = 22)
+      )
+    ),
+
+    legend = list(
+      orientation = "h",
+      x = 0.5, xanchor = "center",
+      y = -0.22
+    )
+  ) %>%
+  config(
+    responsive = TRUE,
+    scrollZoom = FALSE,
+    displayModeBar = TRUE
+  )
+
+p_weather_interactive
+
+```
+
+The comparison chart shows that Tesla’s fatal‑crash distribution across weather conditions closely mirrors the national pattern overall, but with a few meaningful differences. **Clear weather accounts for the majority of fatal crashes for both Tesla and all vehicles**, reflecting typical roadway exposure, though Tesla’s share is slightly higher. The most notable deviation appears in **Rain**, where Tesla represents **9.2%** of its fatal crashes compared to the national average of **7.1%**, suggesting that Teslas were involved proportionally more often in rainy‑weather fatalities than other vehicles in 2023. In contrast, Tesla involvement in Snow, Fog, and other low‑visibility conditions is slightly **lower** than the industry average, indicating these environments were not major contributors to Tesla fatalities that year.
+
+```{r association-test, include=FALSE, message=FALSE, warning=FALSE}
+# ---- Association test: Weather vs Tesla involvement (crash-level) ----
+
+# 1) Get Tesla crash IDs (each crash counted once)
+tesla_crash_ids <- vehicle_acc %>%
+  dplyr::filter(tesla_flag) %>%
+  dplyr::distinct(st_case) %>%
+  dplyr::pull(st_case)
+
+# 2) Build crash-level dataset
+crash_level <- accident %>%
+  dplyr::transmute(
+    st_case,
+    weather_grp    = bucket_weather(weathername),
+    tesla_involved = st_case %in% tesla_crash_ids
+  )
+
+# 3) Contingency table
+tab <- table(crash_level$weather_grp, crash_level$tesla_involved)
+
+# 4) Determine whether to use Fisher or Chi-square based on expected counts
+use_fisher <- FALSE
+if (all(dim(tab) > 0)) {
+  chi_try  <- suppressWarnings(chisq.test(tab, simulate.p.value = FALSE))
+  expected <- chi_try$expected
+  use_fisher <- any(expected < 5) ||
+                any(rowSums(tab) == 0) ||
+                any(colSums(tab) == 0)
+} else {
+  use_fisher <- TRUE
+}
+
+# 5) Perform appropriate test silently
+if (use_fisher) {
+  test_out <- suppressWarnings(fisher.test(tab))
+  p_value  <- unname(test_out$p.value)
+  stat     <- NA_real_
+  method   <- "Fisher's exact test"
+
+  # Compute Cramer's V from chi-square approximation
+  N <- sum(tab); k <- min(nrow(tab), ncol(tab))
+  cramers_v <- if (k > 1) {
+    chi_stat <- suppressWarnings(chisq.test(tab)$statistic)
+    as.numeric(sqrt(chi_stat / (N * (k - 1))))
+  } else NA_real_
+
+} else {
+  chi <- suppressWarnings(chisq.test(tab, simulate.p.value = FALSE))
+  p_value  <- unname(chi$p.value)
+  stat     <- unname(chi$statistic)
+  method   <- "Chi-square test of independence"
+
+  N <- sum(tab); k <- min(nrow(tab), ncol(tab))
+  cramers_v <- as.numeric(sqrt(stat / (N * (k - 1))))
+}
+
+# 6) Store results silently (no printing)
+assoc_results <- list(
+  method    = method,
+  p_value   = p_value,
+  statistic = stat,
+  cramers_v = cramers_v,
+  n         = sum(tab),
+  table     = tab
+)
+
+# No output, no warnings, fully silent
+```
+
+```{r}
+# 🔧 Chunk A — Prep (bucket weather, crash‑level flags)
+# ---- Chunk A: Weather prep & crash-level flags ----
+library(dplyr)
+library(stringr)
+library(scales)
+
+# 1) Bucket weather names into intuitive groups
+bucket_weather <- function(x) {
+  x <- str_to_title(str_trim(x))
+  dplyr::case_when(
+    is.na(x) | x == "" | x %in% c("Unknown", "Not Reported", "Unknown/Not Reported") ~ "Unknown/Not Reported",
+    str_detect(x, "Clear") ~ "Clear",
+    str_detect(x, "Cloud") ~ "Cloudy",
+    str_detect(x, "Rain|Drizzle|Freezing Rain") ~ "Rain",
+    str_detect(x, "Snow|Sleet|Hail") ~ "Snow / Sleet / Hail",
+    str_detect(x, "Fog|Smog|Smoke") ~ "Fog / Smoke",
+    str_detect(x, "Blowing Sand|Dust|Soil|Dirt") ~ "Blowing Sand / Dust",
+    str_detect(x, "Wind") ~ "Severe Winds",
+    TRUE ~ "Other"
+  )
+}
+
+# 2) Crash-level dataset: one row per crash
+#    'tesla_involved' is TRUE if any vehicle in the crash was a Tesla
+tesla_crash_ids <- vehicle_acc %>%
+  filter(tesla_flag) %>%
+  distinct(st_case) %>%
+  pull(st_case)
+
+crash_level <- accident %>%
+  transmute(
+    st_case,
+    weather_grp = bucket_weather(weathername),
+    tesla_involved = st_case %in% tesla_crash_ids
+  )
+
+# 3) Share of Tesla involvement by weather
+share_by_weather <- crash_level %>%
+  group_by(weather_grp) %>%
+  summarise(
+    crashes = n(),
+    tesla_n = sum(tesla_involved),
+    tesla_share = tesla_n / crashes,
+    .groups = "drop"
+  ) %>%
+  arrange(desc(tesla_share))
+
+overall_share <- mean(crash_level$tesla_involved)
+
+# 4) Rain vs Clear 2x2 and a small table for plotting
+rain_clear <- crash_level %>%
+  filter(weather_grp %in% c("Clear", "Rain")) %>%
+  mutate(weather_bin = factor(weather_grp, levels = c("Clear","Rain")))
+
+tab_rc <- table(rain_clear$weather_bin, rain_clear$tesla_involved)  # rows: Clear/Rain ; cols: FALSE/TRUE
+
+# Logistic model to get odds ratio (Rain vs Clear)
+m_rc <- glm(tesla_involved ~ weather_bin, data = rain_clear, family = binomial())
+or_rc  <- unname(exp(coef(m_rc)[2]))
+
+```
+
+---
+
+### **Percent of Fatal Crashes Involving a Tesla, by Weather Type**
+
+```{r}
+# 📊 Chunk B — Visuals (percentages + Rain vs Clear with OR)
+library(dplyr)
+library(ggplot2)
+library(plotly)
+library(scales)
+library(grid)
+
+# 1) Build inputs ------------------------------------------------------------
+share_by_weather <- crash_level %>%
+  group_by(weather_grp) %>%
+  summarise(
+    crashes       = n(),
+    tesla_crashes = sum(as.integer(tesla_involved), na.rm = TRUE),
+    tesla_share   = tesla_crashes / crashes,
+    .groups = "drop"
+  )
+
+# Overall/national share
+overall_share <- mean(as.integer(crash_level$tesla_involved), na.rm = TRUE)
+
+# Order categories by Tesla share
+wx_for_plot <- share_by_weather %>%
+  mutate(weather_grp = factor(weather_grp, levels = weather_grp[order(-tesla_share)]))
+
+# 2) Styling ------------------------------------------------------------------
+normal_orange <- "#F97316"
+light_orange  <- "#FFEAD5"
+
+min_s   <- min(wx_for_plot$tesla_share, na.rm = TRUE)
+max_s   <- max(wx_for_plot$tesla_share, na.rm = TRUE)
+plateau <- max_s * 0.60
+y_max   <- max(c(wx_for_plot$tesla_share, overall_share), na.rm = TRUE) * 1.28
+
+# 3) Plot ------------------------------------------
+p_share_clean <- ggplot(
+  wx_for_plot,
+  aes(
+    x = weather_grp,
+    y = tesla_share,
+    fill = tesla_share,
+    text = paste0(
+      "<b>", weather_grp, "</b>",
+      "<br>Tesla share: ", percent(tesla_share, accuracy = 0.1),
+      "<br>Total crashes (all makes): ", comma(crashes)
+    )
+  )
+) +
+  geom_col(width = 0.72, color = "#111111", linewidth = 0.25) +
+  geom_text(
+    aes(label = percent(tesla_share, accuracy = 0.1)),
+    vjust = -0.45, size = 4.6, fontface = "bold"
+  ) +
+  geom_hline(
+    yintercept = overall_share,
+    color = "#6B7280",
+    linetype = "longdash",
+    linewidth = 0.5
+  ) +
+  scale_fill_gradientn(
+    colours = c(light_orange, normal_orange, normal_orange),
+    values  = scales::rescale(c(min_s, plateau, max_s)),
+    name    = "% Tesla share",
+    labels  = percent_format(accuracy = 0.1)
+  ) +
+  scale_y_continuous(
+    labels = percent_format(accuracy = 0.1),
+    limits = c(0, y_max),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  scale_x_discrete(expand = expansion(mult = c(0.02, 0.18))) +
+  labs(
+    title    = "Share of Fatal Crashes Involving Tesla — by Weather",
+    subtitle = "Bars show % of fatal crashes within each weather category involving a Tesla; dashed line = national average",
+    x = "Weather",
+    y = "% of crashes involving Tesla",
+    caption = "Source: NHTSA FARS 2023"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title    = element_text(face = "plain", size = 18),
+    plot.subtitle = element_text(size = 12.5),
+    axis.text.x   = element_text(angle = 45, hjust = 1),
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_line(color = "#E6E8EF")
+  ) +
+  coord_cartesian(clip = "off")
+
+# 4) Convert to Plotly AND add actual annotation
+ggplotly(p_share_clean, tooltip = "text") %>%
+  layout(
+    hoverlabel = list(bgcolor = "white", font = list(color = "#111", size = 12)),
+    margin     = list(l = 40, r = 30, t = 70, b = 90),
+    coloraxis  = list(colorbar = list(title = "% Tesla share")),
+
+    annotations = list(
+      list(
+        x = 0.80,                         # 0 = left, 1 = right
+        xref = "paper",
+        
+        y = overall_share + 0.0008,       # just above dashed line
+        yref = "y",
+        
+        text = paste0("Overall Tesla share: ", percent(overall_share, 0.1)),
+        showarrow = FALSE,
+        font = list(size = 13, color = "#374151"),
+        align = "left"
+      )
+    )
+  )
+```
+
+Tesla’s presence in fatal crashes varies modestly across weather categories.
+This chart shows **Tesla’s share of all fatal crashes within each weather type, with the dashed line marking the overall national average Tesla share** across every crash in the dataset.
+
+**Rain shows the highest Tesla share**, indicating Teslas make up a larger‑than‑average portion of fatal crashes that occurred during rainy conditions.
+In contrast, categories like **Cloudy, Fog, Snow, and Other** fall below the national average, meaning Teslas are **underrepresented** in fatal crashes in those environments relative to their overall involvement rate.
+
+Because the chart expresses share within each weather condition (not crash counts or rates), it highlights **where Teslas appear more or less often than expected**, based purely on proportional involvement within each weather group.
+
+---
+
+### **Tesla vs National Average — Share of Fatal Crashes by Weather**
+
+```{r}
+# ---- Tesla vs National Average Share by Weather (side-by-side) ----------
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(plotly)
+library(scales)
+
+# 1) Weather bucketing
+bucket_weather <- function(x) {
+  x <- str_to_title(str_trim(x))
+  case_when(
+    is.na(x) | x == "" | x %in% c("Unknown", "Not Reported", "Unknown/Not Reported") ~ "Unknown/Not Reported",
+    str_detect(x, "Clear") ~ "Clear",
+    str_detect(x, "Cloud") ~ "Cloudy",
+    str_detect(x, "Rain|Drizzle|Freezing Rain") ~ "Rain",
+    str_detect(x, "Snow|Sleet|Hail") ~ "Snow / Sleet / Hail",
+    str_detect(x, "Fog|Smog|Smoke") ~ "Fog / Smoke",
+    str_detect(x, "Blowing Sand|Dust|Soil|Dirt") ~ "Blowing Sand / Dust",
+    str_detect(x, "Wind") ~ "Severe Winds",
+    TRUE ~ "Other"
+  )
+}
+
+# 2) Identify Tesla vehicles
+vehicle <- vehicle %>%
+  mutate(
+    makename_fix     = toupper(trimws(makename)),
+    vpicmakename_fix = toupper(trimws(vpicmakename)),
+    tesla_flag       = str_starts(vpicmakename_fix, "TESLA") | str_starts(makename_fix, "TESLA")
+  )
+
+# 3) Crash-level table
+tesla_crash_ids <- vehicle %>%
+  filter(tesla_flag) %>%
+  distinct(st_case) %>%
+  pull(st_case)
+
+crash_level <- accident %>%
+  transmute(
+    st_case,
+    weather_grp    = bucket_weather(weathername),
+    tesla_involved = st_case %in% tesla_crash_ids
+  )
+
+# 4) Compute shares
+share_by_weather <- crash_level %>%
+  group_by(weather_grp) %>%
+  summarise(
+    crashes     = n(),
+    tesla_n     = sum(tesla_involved),
+    tesla_share = tesla_n / crashes,
+    .groups = "drop"
+  )
+
+overall_share <- mean(crash_level$tesla_involved)
+
+# 5) Build side-by-side dataset
+plot_df <- share_by_weather %>%
+  transmute(
+    weather_grp,
+    group = factor("Tesla", levels = c("Tesla","National average")),
+    value = tesla_share,
+    crashes
+  ) %>%
+  bind_rows(
+    share_by_weather %>%
+      transmute(
+        weather_grp,
+        group = factor("National average", levels = c("Tesla","National average")),
+        value = overall_share,
+        crashes
+      )
+  )
+
+# FIX: Create non-overlapping label positions BEFORE plotting
+plot_df <- plot_df %>%
+  mutate(
+    label_y = ifelse(
+      group == "National average",
+      value + 0.00015,   # move national-average label slightly above Tesla’s
+      value
+    )
+  )
+
+# Order by Tesla's share
+order_by_tesla <- share_by_weather %>% arrange(desc(tesla_share)) %>% pull(weather_grp)
+plot_df <- plot_df %>% mutate(weather_grp = factor(weather_grp, levels = order_by_tesla))
+
+# 6) Plot
+tesla_col <- "#F97316"
+avg_col   <- "#94A3B8"
+
+y_max <- max(c(plot_df$value)) * 1.28
+
+p_sbs <- ggplot(
+  plot_df,
+  aes(
+    x = weather_grp,
+    y = value,
+    fill = group,
+    text = paste0(
+      "<b>", weather_grp, "</b>",
+      "<br>", group, ": ", percent(value, accuracy = 0.1),
+      ifelse(group == "Tesla", paste0("<br>Total crashes in weather: ", comma(crashes)), "")
+    )
+  )
+) +
+  geom_col(
+    position = position_dodge(width = 0.72),
+    width = 0.66,
+    color = "#111111",
+    linewidth = 0.25
+  ) +
+  
+  # FINAL FIX: use precomputed separated label_y
+  geom_text(
+    aes(
+      y = label_y,
+      label = percent(value, accuracy = 0.1)
+    ),
+    position = position_dodge(width = 0.72),
+    vjust = -0.4,           # slight vertical offset for clarity
+    size = 4.2,
+    fontface = "bold",
+    color = "#111111"
+  ) +
+  
+  scale_fill_manual(
+    values = c("Tesla" = tesla_col, "National average" = avg_col),
+    name = NULL
+  ) +
+  scale_y_continuous(
+    labels = percent_format(accuracy = 0.1),
+    limits = c(0, y_max),
+    expand = expansion(mult = c(0, 0.05))
+  ) +
+  labs(
+    title    = "Tesla vs National Average — Fatal-Crash Share by Weather",
+    subtitle = "Orange = Tesla share per weather type; Slate = National average Tesla share (all weather)",
+    x = "Weather",
+    y = "% of crashes involving Tesla",
+    caption = "Source: NHTSA FARS 2023"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position   = "top",
+    plot.title        = element_text(face = "plain", size = 18, hjust = 0),  # ✅ NOT BOLD
+    plot.subtitle     = element_text(size = 12.5, hjust = 0),
+    axis.text.x       = element_text(angle = 45, hjust = 1, vjust = 1),
+    panel.grid.major.x= element_blank(),
+    panel.grid.major.y= element_line(color = "#E6E8EF"),
+    plot.margin       = margin(16, 24, 16, 16)
+  ) +
+  coord_cartesian(clip = "off")
+
+# 7) Interactivity
+plotly::ggplotly(p_sbs, tooltip = "text") %>%
+  layout(
+    hoverlabel = list(bgcolor = "white", font = list(color = "#111", size = 12)),
+    margin     = list(l = 40, r = 20, t = 70, b = 90)
+  )
+
+```
+
+This chart compares Tesla’s share of fatal crashes within each weather type to the national average and highlights where Tesla is proportionally over‑ or under‑represented. **Rain conditions show the largest gap**, with Tesla’s share slightly higher than the national baseline, suggesting Teslas appeared more frequently in rain weather‑related fatal crashes than expected for 2023. In contrast, Tesla’s involvement in Cloudy, Fog, Snow, and Dust conditions falls below the national average, indicating those environments contributed less to Tesla’s fatal‑crash distribution.Additionally, Tesla's involvement in clear conditions met the national average. 
+
+```{r B2-prep, include=FALSE, warning=FALSE, message=FALSE}
+# ---- B2: Rain vs Clear (prep only, hidden) -------------------------------
+library(dplyr)
+library(stringr)
+library(ggplot2)
+library(plotly)
+library(scales)
+
+# 0) Helper to bucket weather
+bucket_weather <- function(x) {
+  x <- str_to_title(str_trim(x))
+  dplyr::case_when(
+    is.na(x) | x == "" | x %in% c("Unknown", "Not Reported", "Unknown/Not Reported") ~ "Unknown/Not Reported",
+    str_detect(x, "Clear") ~ "Clear",
+    str_detect(x, "Cloud") ~ "Cloudy",
+    str_detect(x, "Rain|Drizzle|Freezing Rain") ~ "Rain",
+    str_detect(x, "Snow|Sleet|Hail") ~ "Snow / Sleet / Hail",
+    str_detect(x, "Fog|Smog|Smoke") ~ "Fog / Smoke",
+    str_detect(x, "Blowing Sand|Dust|Soil|Dirt") ~ "Blowing Sand / Dust",
+    str_detect(x, "Wind") ~ "Severe Winds",
+    TRUE ~ "Other"
+  )
+}
+
+# 1) Robust Tesla flag (from VPIC and MAKE)
+vehicle <- vehicle %>%
+  mutate(
+    makename_fix     = toupper(trimws(makename)),
+    vpicmakename_fix = toupper(trimws(vpicmakename)),
+    tesla_flag       = str_starts(vpicmakename_fix, "TESLA") | str_starts(makename_fix, "TESLA")
+  )
+
+# (Optional) quick sanity check — still hidden because include=FALSE
+invisible(
+  vehicle %>%
+    filter(tesla_flag) %>%
+    count(makename_fix, vpicmakename_fix, sort = TRUE) %>%
+    print(n = 10)
+)
+
+# 2) Crash-level table
+tesla_crash_ids <- vehicle %>%
+  filter(tesla_flag) %>%
+  distinct(st_case) %>%
+  pull(st_case)
+
+crash_level <- accident %>%
+  transmute(
+    st_case,
+    weather_grp    = bucket_weather(weathername),
+    tesla_involved = st_case %in% tesla_crash_ids
+  )
+
+# 3) Restrict to Rain vs Clear (ordered)
+rain_clear <- crash_level %>%
+  filter(weather_grp %in% c("Clear","Rain")) %>%
+  mutate(weather_bin = factor(weather_grp, levels = c("Clear","Rain")))
+
+# 4) Shares
+share_rc <- rain_clear %>%
+  group_by(weather_bin) %>%
+  summarise(share = mean(tesla_involved), n = n(), .groups = "drop")
+
+# Logistic regression OR (Rain vs Clear)
+m_rc  <- glm(tesla_involved ~ weather_bin, data = rain_clear, family = binomial())
+se    <- sqrt(vcov(m_rc)[2,2])
+ci_rc <- exp(coef(m_rc)[2] + c(-1,1)*1.96*se)
+or_rc <- unname(exp(coef(m_rc)[2]))
+p_rc  <- summary(m_rc)$coefficients[2,4]
+
+# Fisher’s exact test — FIX: define tab_rc
+tab_rc <- table(rain_clear$weather_bin, rain_clear$tesla_involved)
+fish   <- fisher.test(tab_rc)
+or_f   <- unname(fish$estimate)
+ci_f   <- fish$conf.int
+p_f    <- fish$p.value
+
+# Subtitle text for the plot (uses Fisher by default)
+subtxt <- paste0(
+  "Odds Ratio (Rain vs Clear) = ", sprintf("%.2f", or_f),
+  " [", sprintf("%.2f", ci_f[1]), "–", sprintf("%.2f", ci_f[2]), "]",
+  ifelse(p_f < 0.001, "  p < 0.001", paste0("  p = ", signif(p_f, 3)))
+)
+```
+
+---
+
+### **Rain vs Clear: Tesla’s Fatal‑Crash Share Is Higher in Rain** 
+
+```{r B2-plot, echo=FALSE, warning=FALSE, message=FALSE}
+# ---- B2: Rain vs Clear (plot only) ---------------------------------------
+p_rc <- ggplot(
+  share_rc,
+  aes(
+    x = weather_bin,
+    y = share,
+    text = paste0(
+      "<b>", weather_bin, "</b>",
+      "<br>Tesla share: ", percent(share, accuracy = 0.1),
+      "<br>N (fatal crashes): ", comma(n)
+    )
+  )
+) +
+  geom_col(
+    width = 0.55,
+    fill = c("#94A3B8", "#F97316"),
+    color = "#111111",
+    linewidth = 0.25
+  ) +
+  
+  # Simple clean labels, no staggering needed
+  geom_text(
+    aes(label = percent(share, accuracy = 0.1)),
+    vjust = -0.45,
+    size = 5,
+    fontface = "bold",
+    color = "#111111"
+  ) +
+  
+  scale_y_continuous(
+    labels = percent,
+    expand = expansion(mult = c(0, 0.30))
+  ) +
+  
+  labs(
+    title    = "Tesla Involvement in Fatal Crashes — Rain vs Clear",  # Title NOT bold now
+    subtitle = subtxt,   # keeps the OR and CI summary
+    x = "Weather",
+    y = "% of fatal crashes involving a Tesla",
+    caption = "FARS 2023"
+  ) +
+  
+  theme_minimal(base_size = 13) +
+  theme(
+    plot.title        = element_text(face = "plain", size = 18, hjust = 0),   # NOT BOLD
+    plot.subtitle     = element_text(size = 12.5, hjust = 0, margin = margin(b = 8)),
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_line(color = "#E6E8EF"),
+    plot.margin       = margin(16, 24, 16, 16)
+  ) +
+  
+  coord_cartesian(clip = "off")
+
+plotly::ggplotly(p_rc, tooltip = "text") %>%
+  layout(
+    hoverlabel = list(bgcolor = "white", font = list(color = "#111", size = 12)),
+    margin     = list(l = 40, r = 20, t = 80, b = 70)
+  )
+```
+
+Teslas made up a noticeably higher share of fatal crashes in **Rain** than in **Clear** weather, despite clear conditions accounting for far more real‑world driving time. This makes rain the most meaningful weather‑related outlier in 2023.
+
+While part of the increase reflects the higher inherent risk of driving in rain, the national average share for rainy‑weather fatal crashes was only **0.5%**, compared to Tesla’s higher proportion. This gap may prompt operational questions about how reliably camera‑only perception systems perform in heavy rain and whether supplemental sensors—such as radar or LiDAR—could reduce visibility‑related challenges if these patterns persist.
+
+The comparison highlights where Tesla’s involvement rises above baseline and suggests an area worth deeper technical investigation rather than a causal conclusion.
+
+---
+
+<div style="text-align:center;">
+### Statistical Results 🧪 
+</div>
+
+---
+
+```{r statistical_results_table, echo=FALSE, message=FALSE, warning=FALSE}
+
+library(tibble)
+library(knitr)
+library(scales)
+
+# ----computed values ----
+overall_share_pct <- percent(overall_share, accuracy = 0.1)
+rain_share        <- percent(share_by_weather$tesla_share[share_by_weather$weather_grp == "Rain"], accuracy = 0.1)
+clear_share       <- percent(share_by_weather$tesla_share[share_by_weather$weather_grp == "Clear"], accuracy = 0.1)
+
+# Fisher/Chi-square results
+p_val      <- signif(assoc_results$p_value, 3)
+cramers_v  <- signif(assoc_results$cramers_v, 3)
+rain_or    <- signif(or_f, 3)
+rain_ci_lo <- signif(ci_f[1], 3)
+rain_ci_hi <- signif(ci_f[2], 3)
+
+# ----summary table ----
+stat_table <- tibble(
+  `Statistic / Test` = c(
+    "Fisher’s Exact / Chi-square Test",
+    "Cramer’s V (effect size)",
+    "Tesla Share in Rain",
+    "Tesla Share in Clear",
+    "Industry Average Tesla Share",
+    "Rain vs Clear Odds Ratio",
+    "Rain vs Clear 95% Confidence Interval",
+    "P-value (association across weather)"
+  ),
+  `Result` = c(
+    "Significant association",
+    cramers_v,
+    rain_share,
+    clear_share,
+    overall_share_pct,
+    rain_or,
+    paste0(rain_ci_lo, " – ", rain_ci_hi),
+    p_val
+  ),
+  `Interpretation` = c(
+    "Weather and Tesla involvement vary more than expected by chance.",
+    "Small but meaningful association between weather and Tesla involvement.",
+    "Highest Tesla involvement rate of any weather type.",
+    "Above national baseline but lower than Rain.",
+    "Baseline Tesla share across all fatal crashes.",
+    "Tesla involvement more likely in Rain vs Clear.",
+    "Rain shows stronger involvement than Clear.",
+    "Weather differences in Tesla involvement are statistically significant."
+  )
+)
+
+# ---- Render table ----
+kable(
+  stat_table,
+  caption = "Statistical Testing Summary for Tesla Weather Analysis",
+  align = "lcc"
+)
+```
+
+A series of statistical tests were used to evaluate whether Tesla involvement in fatal crashes varied by weather condition. Fisher’s Exact Test indicated a **significant association** between weather and Tesla involvement, with a small but meaningful effect size (Cramer’s V). Across all weather categories, **Rain consistently showed the highest relative involvement**, and a focused Rain vs Clear model confirmed this with a **significant odds ratio**, indicating Tesla‑involved fatal crashes were more likely in rain than in clear weather.
+
+---
+
+<div style="text-align:center;">
+### Key Findings 📌
+</div>
+
+---
+
+- Rain is the **only weather condition** where Tesla is overrepresented vs national average.
+- Tesla involvement in Clear weather is **at the national average**.
+- Snow, Fog, and Cloudy conditions show **lower-than-expected involvement**.
+- Tesla fatal crashes are concentrated in **high‑adoption states**, especially California.
+
